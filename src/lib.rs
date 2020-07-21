@@ -1,8 +1,14 @@
 use std::thread;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::Mutex;
 
 pub struct ThreadPool {
-    threads: Vec<thread::JoinHandle<()>>,
+    workers: Vec<Worker>,
+    sender: mpsc::Sender<Job>,
 }
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl ThreadPool {
     /// Create a new ThreadPool.
@@ -15,19 +21,45 @@ impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
         assert!(size > 0);
 
-        let mut threads = Vec::with_capacity(size);
+        let (sender, receiver) = mpsc::channel();
+
+        let receiver = Arc::new(Mutex::new(receiver));
+
+        let mut workers = Vec::with_capacity(size);
 
         for _ in 0..size {
-            // create some threads
-            // store in vector
+            // Channel implementation is multiple producer, single consumer.
+            // We can't simply clone the consuming end, so we must use an
+            // Arc<Mutex<T>>.
+            workers.push(Worker::new(size, Arc::clone(&receiver)));
         }
 
-        ThreadPool { threads }
+        ThreadPool { workers, sender }
     }
 
     pub fn execute<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
+        let job = Box::new(f);
+
+        self.sender.send(job).unwrap();
+    }
+}
+
+struct Worker {
+    id: usize,
+    thread: thread::JoinHandle<()>,
+}
+
+impl Worker {
+    fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
+        let thread = thread::spawn(move || loop {
+            let job = receiver.lock().unwrap().recv().unwrap();
+
+            job();
+        });
+
+        Worker {id, thread}
     }
 }
